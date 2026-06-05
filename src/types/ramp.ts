@@ -56,7 +56,9 @@ export interface QuoteData {
   destination_amount?: number;
   source_currency?: string;
   destination_currency?: string;
-  exchange_rate?: string;
+  provider_id?: string;
+  provider_name?: string;
+  exchange_rate?: number;
   expires_at?: string;
   fees?: {
     total_fee?: number;

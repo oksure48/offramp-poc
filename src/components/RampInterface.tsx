@@ -138,6 +138,8 @@ export function RampInterface() {
   const [amount, setAmount] = useState("100");
 
   const [quote, setQuote] = useState<QuoteData | null>(null);
+  const [quoteOptions, setQuoteOptions] = useState<QuoteData[]>([]);
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
   const [result, setResult] = useState<TransactionResult | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
@@ -379,6 +381,8 @@ export function RampInterface() {
 
     setLoading(true);
     setQuote(null);
+    setQuoteOptions([]);
+    setSelectedProviderId(null);
     try {
       const endpoint =
         rampType === "onramp"
@@ -436,7 +440,25 @@ export function RampInterface() {
         throw new Error(msg || `Failed to get ${rampType} quote`);
       }
       const data = await res.json();
-      setQuote(data);
+      const payload = Array.isArray(data)
+        ? data
+        : Array.isArray((data as any).data)
+        ? (data as any).data
+        : data;
+
+      if (Array.isArray(payload)) {
+        const sortedQuotes = [...payload].sort(
+          (a, b) =>
+            parseFloat(a.exchange_rate || "0") -
+            parseFloat(b.exchange_rate || "0")
+        );
+        setQuoteOptions(sortedQuotes);
+        const defaultQuote = sortedQuotes[0] ?? null;
+        setSelectedProviderId(defaultQuote?.provider_id ?? null);
+        setQuote(defaultQuote);
+      } else {
+        setQuote(payload as QuoteData);
+      }
     } catch (err) {
       setError(
         err instanceof Error ? err.message : `Failed to get ${rampType} quote`
@@ -487,6 +509,7 @@ export function RampInterface() {
               blockchain: selectedChain,
               source_currency: selectedToken,
               destination_currency: selectedFiatCurrency,
+              provider: selectedProviderId || quote.provider_id || "moonpay",
             };
 
       const res = await fetch(endpoint, {
@@ -981,6 +1004,54 @@ export function RampInterface() {
 
               {/* Right: Quote / Result */}
               <div>
+                {quoteOptions.length > 0 && (
+                  <div className="mb-4 space-y-3 rounded-lg border border-primary/20 bg-primary/5 p-4">
+                    <p className="font-medium text-sm">Provider Quotes</p>
+                    <div className="grid gap-3">
+                      {quoteOptions.map((option) => {
+                        const isSelected =
+                          option.provider_id === selectedProviderId;
+                        return (
+                          <button
+                            key={option.provider_id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedProviderId(option.provider_id || null);
+                              setQuote(option);
+                            }}
+                            className={`w-full rounded-lg border p-3 text-left transition ${
+                              isSelected
+                                ? "border-primary bg-primary/10"
+                                : "border-border bg-background hover:border-primary/50"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-medium">
+                                {option.provider_name || option.provider_id}
+                              </span>
+                              <span className="text-xs text-muted-foreground">
+                                Rate
+                              </span>
+                            </div>
+                            <div className="mt-2 flex items-center justify-between text-sm">
+                              <span className="text-muted-foreground">{option.source_amount} {option.source_currency}</span>
+                              <span className="font-medium">{option.destination_amount} {option.destination_currency}</span>
+                            </div>
+                            <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
+                              <span>{option.exchange_rate}</span>
+                              {isSelected && (
+                                <span className="text-primary">Selected</span>
+                              )}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Defaulted to the provider with the lowest rate.
+                    </p>
+                  </div>
+                )}
                 {quote && (
                   <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-3">
                     <p className="font-medium text-sm">Quote</p>

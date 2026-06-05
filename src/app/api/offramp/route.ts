@@ -4,20 +4,24 @@
  * POST /api/offramp - Handle offramp operations (quote or execute)
  *
  * Actions:
- * - quote: Get a quote for crypto to fiat conversion
- * - execute: Execute an offramp with a quote
- *
- * Reference: https://docs.iron.xyz
+ * - quote: Get quotes from one or more offramp providers
+ * - execute: Execute an offramp with a selected provider quote
  */
 
 import { NextRequest } from "next/server";
 import { createResponse, handleApiError } from "@/lib/api-response";
 import {
-  ironClient,
-  type OfframpQuoteRequest,
   type CreateOfframpRequest,
+  type OfframpQuoteRequest,
 } from "@/lib/services/iron";
+import {
+  executeOfframpProvider,
+  getOfframpProviderQuotes,
+  type OfframpProviderId,
+} from "@/lib/services/offrampProviders";
 import { z } from "zod";
+
+const providerEnum = z.enum(["moonpay", "bitso", "bybit"]).optional();
 
 const quoteSchema = z.object({
   action: z.literal("quote"),
@@ -29,6 +33,7 @@ const quoteSchema = z.object({
   bank_account_id: z.string().min(1, "Bank account ID (IBAN) is required"),
   bank_id: z.string().optional(),
   blockchain: z.enum(["Ethereum", "Solana", "Polygon", "Arbitrum", "Base", "Stellar", "Citrea"]).optional(),
+  provider: providerEnum,
 });
 
 const executeSchema = z.object({
@@ -40,6 +45,7 @@ const executeSchema = z.object({
   blockchain: z.enum(["Ethereum", "Solana", "Polygon", "Arbitrum", "Base", "Stellar", "Citrea"]).optional(),
   source_currency: z.enum(["USDC", "USDT", "USDB", "EURC"]).optional(),
   destination_currency: z.enum(["USD", "EUR", "GBP", "BRL", "MXN"]).optional(),
+  provider: providerEnum,
 });
 
 const requestSchema = z.discriminatedUnion("action", [
@@ -59,7 +65,6 @@ export async function POST(req: NextRequest) {
     const validated = requestSchema.parse(body);
 
     if (validated.action === "quote") {
-      // Get offramp quote
       const quoteRequest: OfframpQuoteRequest = {
         customer_id: validated.customer_id,
         source_currency: validated.source_currency,
@@ -71,23 +76,28 @@ export async function POST(req: NextRequest) {
         blockchain: validated.blockchain,
       };
 
-      const quote = await ironClient.getOfframpQuote(quoteRequest);
-      return createResponse(quote, 200);
-    } else {
-      // Execute offramp
-      const offrampRequest: CreateOfframpRequest = {
-        quote_id: validated.quote_id,
-        customer_id: validated.customer_id,
-        bank_account_id: validated.bank_account_id,
-        bank_id: validated.bank_id,
-        blockchain: validated.blockchain,
-        source_currency: validated.source_currency,
-        destination_currency: validated.destination_currency,
-      };
-
-      const offramp = await ironClient.createOfframp(offrampRequest);
-      return createResponse(offramp, 201);
+      const quotes = await getOfframpProviderQuotes(
+        quoteRequest,
+        validated.provider as OfframpProviderId | undefined
+      );
+      return createResponse(quotes, 200);
     }
+
+    const offrampRequest: CreateOfframpRequest = {
+      quote_id: validated.quote_id,
+      customer_id: validated.customer_id,
+      bank_account_id: validated.bank_account_id,
+      bank_id: validated.bank_id,
+      blockchain: validated.blockchain,
+      source_currency: validated.source_currency,
+      destination_currency: validated.destination_currency,
+    };
+
+    const offramp = await executeOfframpProvider(
+      (validated.provider as OfframpProviderId) ?? "moonpay",
+      offrampRequest
+    );
+    return createResponse(offramp, 201);
   } catch (error) {
     return handleApiError(error, "offramp");
   }
