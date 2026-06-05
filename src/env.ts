@@ -11,4 +11,10 @@ export const env = {
 
   // Dynamic
   NEXT_PUBLIC_DYNAMIC_ENVIRONMENT_ID: process.env.NEXT_PUBLIC_DYNAMIC_ENVIRONMENT_ID || "",
+
+  // Velocity
+  VELOCITY_API_KEY: process.env.VELOCITY_API_KEY || "",
+  VELOCITY_CUSTOMER_ENTITY_ID: process.env.VELOCITY_CUSTOMER_ENTITY_ID || "",
+  VELOCITY_OPERATOR_ENTITY_ID: process.env.VELOCITY_OPERATOR_ENTITY_ID || "",
+  VELOCITY_BASE_URL: process.env.VELOCITY_BASE_URL || "https://api-staging.velocity.xyz",
 } as const;
