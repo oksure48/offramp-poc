@@ -103,6 +103,66 @@ type ConnectionStatus =
 const SOURCE_CURRENCIES = ["USD", "EUR", "BRL"] as const;
 type SourceCurrency = (typeof SOURCE_CURRENCIES)[number];
 
+// ─── flow types ───────────────────────────────────────────────────────────────
+
+type FlowId = "onramp" | "swap" | "offramp-usd" | "offramp-fiat";
+
+interface FlowDef {
+  label: string;
+  from: string;
+  to: string;
+  srcCurrency: string;
+  rail: string;
+  defaultAmount: string;
+  minAmountNote?: string;
+  badge: string;
+  badgeColor: string;
+}
+
+const FLOW_DEFS: Record<FlowId, FlowDef> = {
+  onramp: {
+    label: "Onramp",
+    from: "USD",
+    to: "USDC",
+    srcCurrency: "USD",
+    rail: "Platform internal",
+    defaultAmount: "10",
+    badge: "Buy",
+    badgeColor: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+  },
+  swap: {
+    label: "Swap",
+    from: "USDC",
+    to: "USD",
+    srcCurrency: "USDC",
+    rail: "Platform internal",
+    defaultAmount: "5",
+    badge: "Redeem",
+    badgeColor: "bg-teal-500/10 text-teal-700 dark:text-teal-400",
+  },
+  "offramp-usd": {
+    label: "Offramp USD",
+    from: "USDC",
+    to: "USD Bank",
+    srcCurrency: "USDC",
+    rail: "ACH / Wire / RTP",
+    defaultAmount: "5",
+    badge: "Bank",
+    badgeColor: "bg-indigo-500/10 text-indigo-700 dark:text-indigo-400",
+  },
+  "offramp-fiat": {
+    label: "Offramp Fiat",
+    from: "USDC",
+    to: "BRL (PIX)",
+    srcCurrency: "USDC",
+    rail: "PIX",
+    defaultAmount: "20",
+    minAmountNote: "Minimum ~$12 USD for BRL corridor",
+    badge: "Global",
+    badgeColor: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  },
+};
+
 // ─── main component ──────────────────────────────────────────────────────────
 
 export function LightsparkInterface() {
@@ -127,15 +187,18 @@ export function LightsparkInterface() {
   const [externalAccounts, setExternalAccounts] = useState<LightsparkExternalAccount[]>([]);
   const [loadingPlatformAccounts, setLoadingPlatformAccounts] = useState(false);
   const [fundingAccountId, setFundingAccountId] = useState<string | null>(null);
+  const [transactionsByCurrency, setTransactionsByCurrency] = useState<Record<string, LightsparkTransaction[]>>({});
+  const [loadingTransactions, setLoadingTransactions] = useState<Record<string, boolean>>({});
+  const [expandedAccounts, setExpandedAccounts] = useState<Record<string, boolean>>({});
+  const [transactionsFallbackByCurrency, setTransactionsFallbackByCurrency] = useState<Record<string, boolean>>({});
 
   type DemoStage = "idle" | "quoting" | "quoted" | "executing" | "done" | "error";
+  const [activeFlow, setActiveFlow] = useState<FlowId>("onramp");
   const [demoStage, setDemoStage] = useState<DemoStage>("idle");
   const [demoQuote, setDemoQuote] = useState<LightsparkQuote | null>(null);
   const [demoTxn, setDemoTxn] = useState<LightsparkTransaction | null>(null);
   const [demoError, setDemoError] = useState("");
   const [demoAmount, setDemoAmount] = useState("10");
-  const [demoSrcId, setDemoSrcId] = useState("");
-  const [demoDstId, setDemoDstId] = useState("");
 
   // ── data fetching ──────────────────────────────────────────────────────────
 
@@ -151,11 +214,6 @@ export function LightsparkInterface() {
       const platData = await platRes.json();
       const accounts: LightsparkInternalAccount[] = platData.data ?? [];
       setPlatformAccounts(accounts);
-      // Default: first INTERNAL_FIAT as source, first INTERNAL_CRYPTO as destination
-      const fiat = accounts.find((a) => a.type === "INTERNAL_FIAT");
-      const crypto = accounts.find((a) => a.type === "INTERNAL_CRYPTO");
-      if (fiat) setDemoSrcId(fiat.id);
-      if (crypto) setDemoDstId(crypto.id);
 
       if (extRes?.ok) {
         const extData = await extRes.json();
@@ -275,12 +333,15 @@ export function LightsparkInterface() {
   };
 
   const handleFundAccount = async (accountId: string) => {
+    const acct = platformAccounts.find((a) => a.id === accountId);
+    // $1,000 USD (2 decimals) or 1,000 USDC (6 decimals)
+    const amount = acct?.type === "INTERNAL_CRYPTO" ? 1_000_000_000 : 100_000;
     setFundingAccountId(accountId);
     try {
       await fetch(`${config.api.baseUrl}/api/lightspark/sandbox-fund`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountId, amount: 100000 }), // $1,000
+        body: JSON.stringify({ accountId, amount }),
       });
       await fetchPlatformAccounts(customers[0]?.id);
     } finally {
@@ -288,17 +349,80 @@ export function LightsparkInterface() {
     }
   };
 
+  const toggleAccountTransactions = async (currencyCode: string, accountId: string) => {
+    setExpandedAccounts((s) => ({ ...s, [accountId]: !s[accountId] }));
+    // If already loaded or toggling closed, do nothing else
+    if (transactionsByCurrency[currencyCode] || expandedAccounts[accountId]) return;
+    setLoadingTransactions((s) => ({ ...s, [currencyCode]: true }));
+    try {
+      const res = await fetch(`${config.api.baseUrl}/api/lightspark/transactions`);
+      const data = await res.json();
+      const txns: LightsparkTransaction[] = data.data ?? [];
+      const filtered = txns.filter((t) => {
+        const sent = t.sentAmount?.currency?.toUpperCase?.() ?? "";
+        const recv = t.receivedAmount?.currency?.toUpperCase?.() ?? "";
+        return sent === currencyCode.toUpperCase() || recv === currencyCode.toUpperCase();
+      });
+      if (filtered.length > 0) {
+        setTransactionsByCurrency((s) => ({ ...s, [currencyCode]: filtered }));
+        setTransactionsFallbackByCurrency((s) => ({ ...s, [currencyCode]: false }));
+      } else if (txns.length > 0) {
+        // Fallback: show recent transactions if none match the currency code
+        setTransactionsByCurrency((s) => ({ ...s, [currencyCode]: txns.slice(0, 10) }));
+        setTransactionsFallbackByCurrency((s) => ({ ...s, [currencyCode]: true }));
+      } else {
+        setTransactionsByCurrency((s) => ({ ...s, [currencyCode]: [] }));
+        setTransactionsFallbackByCurrency((s) => ({ ...s, [currencyCode]: false }));
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingTransactions((s) => ({ ...s, [currencyCode]: false }));
+    }
+  };
+
+  const handleFlowChange = (flowId: FlowId) => {
+    setActiveFlow(flowId);
+    setDemoAmount(FLOW_DEFS[flowId].defaultAmount);
+    setDemoStage("idle");
+    setDemoQuote(null);
+    setDemoTxn(null);
+    setDemoError("");
+  };
+
+  const handleReset = () => {
+    setDemoStage("idle");
+    setDemoQuote(null);
+    setDemoTxn(null);
+    setDemoError("");
+  };
+
   const handleCreateQuote = async () => {
     const parsed = parseFloat(demoAmount);
-    if (isNaN(parsed) || parsed <= 0 || !demoSrcId || !demoDstId) return;
-    const srcAcct = platformAccounts.find((a) => a.id === demoSrcId);
+    if (isNaN(parsed) || parsed <= 0) return;
+
+    const usdInternal = platformAccounts.find((a) => a.type === "INTERNAL_FIAT");
+    const usdcInternal = platformAccounts.find((a) => a.type === "INTERNAL_CRYPTO");
+    const brlExternal = externalAccounts.find((a) => a.accountInfo.accountType === "BRL_ACCOUNT");
+    const usdExternal = externalAccounts.find((a) => a.accountInfo.accountType === "USD_ACCOUNT");
+
+    const flowIds: Record<FlowId, { srcId?: string; dstId?: string }> = {
+      onramp: { srcId: usdInternal?.id, dstId: usdcInternal?.id },
+      swap: { srcId: usdcInternal?.id, dstId: usdInternal?.id },
+      "offramp-usd": { srcId: usdcInternal?.id, dstId: usdExternal?.id },
+      "offramp-fiat": { srcId: usdcInternal?.id, dstId: brlExternal?.id },
+    };
+
+    const { srcId, dstId } = flowIds[activeFlow];
+    if (!srcId || !dstId) return;
+
+    const srcAcct = platformAccounts.find((a) => a.id === srcId);
     const srcDecimals = srcAcct?.balance?.currency?.decimals ?? 2;
     const lockedCurrencyAmount = Math.round(parsed * Math.pow(10, srcDecimals));
-
-    const isExternalDst = demoDstId.startsWith("ExternalAccount:");
-    const senderCustomerInfo = isExternalDst
-      ? { BUSINESS_TYPE: "CORPORATION", PURPOSE_OF_PAYMENT: "GOODS_PAYMENT" }
-      : undefined;
+    const senderCustomerInfo =
+      activeFlow === "offramp-fiat"
+        ? { BUSINESS_TYPE: "CORPORATION", PURPOSE_OF_PAYMENT: "GOODS_PAYMENT" }
+        : undefined;
 
     setDemoStage("quoting");
     setDemoError("");
@@ -308,7 +432,7 @@ export function LightsparkInterface() {
       const res = await fetch(`${config.api.baseUrl}/api/lightspark/quotes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceAccountId: demoSrcId, destinationAccountId: demoDstId, lockedCurrencyAmount, senderCustomerInfo }),
+        body: JSON.stringify({ sourceAccountId: srcId, destinationAccountId: dstId, lockedCurrencyAmount, senderCustomerInfo }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to create quote");
@@ -621,22 +745,23 @@ export function LightsparkInterface() {
         </CardContent>
       </Card>
 
-      {/* ── Execution Demo ──────────────────────────────────────────────────── */}
+      {/* ── Payment Flows ───────────────────────────────────────────────────── */}
       <Card className="max-w-5xl mx-auto">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Zap className="h-4 w-4" />
-            Live Execution Demo
+            Payment Flows
           </CardTitle>
           <CardDescription>
-            Create and execute real quotes against platform accounts — sandbox, no real funds
+            Four live flows against real sandbox accounts — onramp, swap, and offramp
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
-          {/* Platform accounts */}
+
+          {/* Platform balances */}
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-              Platform Internal Accounts
+              Platform Balances
             </p>
             {loadingPlatformAccounts && platformAccounts.length === 0 ? (
               <div className="flex items-center gap-2 text-muted-foreground text-sm">
@@ -649,50 +774,100 @@ export function LightsparkInterface() {
                   const bal = acct.balance.amount / Math.pow(10, curr.decimals ?? 2);
                   const totalBal = acct.totalBalance.amount / Math.pow(10, curr.decimals ?? 2);
                   const isFiat = acct.type === "INTERNAL_FIAT";
+                  const isCrypto = acct.type === "INTERNAL_CRYPTO";
+                  const isEmbedded = acct.type === "EMBEDDED_WALLET";
                   const held = totalBal - bal;
                   return (
-                    <div key={acct.id} className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">
-                      <div className="flex items-center gap-3">
-                        <span className="font-medium w-12">{curr.code}</span>
-                        <span className="tabular-nums text-foreground font-semibold">
-                          {isFiat
-                            ? `${curr.symbol}${bal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                            : `${bal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: Math.min(curr.decimals ?? 6, 4) })} ${curr.code}`}
-                        </span>
-                        {held > 0.0001 && (
-                          <span className="text-xs text-muted-foreground tabular-nums">
-                            ({totalBal.toLocaleString("en-US", { maximumFractionDigits: 2 })} total, {held.toLocaleString("en-US", { maximumFractionDigits: 2 })} held)
+                    <div key={acct.id}>
+                      <div className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <span className="font-medium w-12 shrink-0">{curr.code}</span>
+                          <span className="tabular-nums font-semibold">
+                            {isFiat
+                              ? `${curr.symbol}${bal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                              : `${bal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: Math.min(curr.decimals ?? 6, 4) })} ${curr.code}`}
                           </span>
-                        )}
-                        <span className={`text-[10px] rounded-full px-1.5 py-0.5 ${
-                          acct.type === "EMBEDDED_WALLET"
-                            ? "bg-purple-500/10 text-purple-600"
-                            : isFiat
-                            ? "bg-blue-500/10 text-blue-600"
+                          {held > 0.0001 && (
+                            <span className="text-xs text-muted-foreground tabular-nums hidden sm:inline">
+                              ({totalBal.toLocaleString("en-US", { maximumFractionDigits: 2 })} total, {held.toLocaleString("en-US", { maximumFractionDigits: 2 })} held)
+                            </span>
+                          )}
+                          <span className={`text-[10px] rounded-full px-1.5 py-0.5 shrink-0 ${
+                            isEmbedded ? "bg-purple-500/10 text-purple-600"
+                            : isFiat ? "bg-blue-500/10 text-blue-600"
                             : "bg-teal-500/10 text-teal-600"
-                        }`}>
-                          {acct.type.replace("_", " ")}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {acct.type === "EMBEDDED_WALLET" && (
-                          <span className="text-[10px] text-muted-foreground">Spark wallet — read-only</span>
-                        )}
-                        {isFiat && (
+                          }`}>
+                            {acct.type.replace(/_/g, " ")}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {isEmbedded && (
+                            <span className="text-[10px] text-muted-foreground">Spark — read-only</span>
+                          )}
+                          {(isFiat || isCrypto) && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-7 text-xs"
+                              disabled={fundingAccountId === acct.id}
+                              onClick={() => handleFundAccount(acct.id)}
+                            >
+                              {fundingAccountId === acct.id && (
+                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                              )}
+                              {isFiat ? "+$1,000" : "+1,000 USDC"} (sandbox)
+                            </Button>
+                          )}
                           <Button
-                            variant="outline"
+                            type="button"
+                            variant="ghost"
                             size="sm"
                             className="h-7 text-xs"
-                            disabled={fundingAccountId === acct.id}
-                            onClick={() => handleFundAccount(acct.id)}
+                            onClick={() => toggleAccountTransactions(curr.code, acct.id)}
                           >
-                            {fundingAccountId === acct.id ? (
-                              <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                            ) : null}
-                            +$1,000 (sandbox)
+                            {expandedAccounts[acct.id] ? "Hide transactions" : "Transactions"}
                           </Button>
-                        )}
+                        </div>
                       </div>
+
+                      {expandedAccounts[acct.id] && (
+                        <div className="mt-2 rounded-md border bg-muted/5 p-3 text-xs">
+                          {loadingTransactions[curr.code] ? (
+                            <div className="flex items-center gap-2 text-muted-foreground">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              <span>Loading transactions…</span>
+                            </div>
+                            ) : (transactionsByCurrency[curr.code] ?? []).length === 0 ? (
+                              transactionsFallbackByCurrency[curr.code] ? (
+                                <p className="text-muted-foreground">No transactions matched {curr.code}; showing recent transactions instead.</p>
+                              ) : (
+                                <p className="text-muted-foreground">No recent transactions for {curr.code}.</p>
+                              )
+                            ) : (
+                            <div className="space-y-2">
+                              {(transactionsByCurrency[curr.code] ?? []).map((t) => (
+                                <div key={t.id} className="flex items-center justify-between">
+                                  <div>
+                                    <p className="font-medium">{t.type} · {t.status}</p>
+                                    <p className="text-muted-foreground text-[11px]">{new Date(t.createdAt).toLocaleString()}</p>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="font-semibold tabular-nums">
+                                      {t.sentAmount && t.sentAmount.currency === curr.code
+                                        ? formatLightsparkAmount(t.sentAmount.amount, t.sentAmount.currency, curr.decimals)
+                                        : t.receivedAmount
+                                        ? formatLightsparkAmount(t.receivedAmount.amount, t.receivedAmount.currency, curr.decimals)
+                                        : "—"}
+                                    </p>
+                                    <p className="text-[10px] text-muted-foreground font-mono truncate" title={t.id}>{t.id}</p>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -700,112 +875,115 @@ export function LightsparkInterface() {
             )}
           </div>
 
-          {/* Quote builder */}
+          {/* Flow selector */}
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+              Select Flow
+            </p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              {(Object.entries(FLOW_DEFS) as [FlowId, FlowDef][]).map(([id, def]) => {
+                const isActive = activeFlow === id;
+                return (
+                  <button
+                    key={id}
+                    onClick={() => handleFlowChange(id)}
+                    disabled={demoStage === "quoting" || demoStage === "executing"}
+                    className={`rounded-lg border p-3 text-left transition-all cursor-pointer ${
+                      isActive
+                        ? "border-primary bg-primary/5 shadow-sm"
+                        : "border-border hover:border-primary/40 hover:bg-muted/40"
+                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                  >
+                    <div className="flex items-center gap-1 mb-1.5">
+                      <span className={`text-[10px] font-semibold rounded-full px-1.5 py-0.5 ${def.badgeColor}`}>
+                        {def.badge}
+                      </span>
+                    </div>
+                    <p className={`font-semibold text-sm mb-0.5 ${isActive ? "text-primary" : ""}`}>
+                      {def.label}
+                    </p>
+                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <span className="font-medium text-foreground/70">{def.from}</span>
+                      <ArrowRight className="h-2.5 w-2.5 shrink-0" />
+                      <span className="font-medium text-foreground/70 truncate">{def.to}</span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground mt-0.5 truncate">{def.rail}</p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Execution panel */}
           <div className="border rounded-lg p-4 space-y-4">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Create &amp; Execute Quote</p>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {/* Header */}
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold">{FLOW_DEFS[activeFlow].label}</p>
+                <div className="flex items-center gap-1.5 mt-0.5 text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground/80">{FLOW_DEFS[activeFlow].from}</span>
+                  <ArrowRight className="h-3 w-3" />
+                  <span className="font-medium text-foreground/80">{FLOW_DEFS[activeFlow].to}</span>
+                  <span>·</span>
+                  <span>{FLOW_DEFS[activeFlow].rail}</span>
+                </div>
+              </div>
+              {FLOW_DEFS[activeFlow].minAmountNote && (
+                <span className="text-[10px] text-amber-600 dark:text-amber-400 shrink-0 pt-0.5">
+                  {FLOW_DEFS[activeFlow].minAmountNote}
+                </span>
+              )}
+            </div>
+
+            {/* Amount + actions */}
+            <div className="flex flex-wrap items-end gap-3">
               <div className="space-y-1">
-                <Label className="text-xs">Amount</Label>
+                <Label className="text-xs">Amount ({FLOW_DEFS[activeFlow].srcCurrency})</Label>
                 <Input
                   type="number"
                   value={demoAmount}
                   onChange={(e) => setDemoAmount(e.target.value)}
-                  placeholder="10"
                   min="0.01"
                   step="any"
+                  className="w-36"
                   disabled={demoStage === "quoting" || demoStage === "executing"}
                 />
               </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Source account</Label>
-                <Select
-                  value={demoSrcId}
-                  onValueChange={setDemoSrcId}
+              <div className="flex gap-2 pb-0.5">
+                <Button
+                  onClick={handleCreateQuote}
                   disabled={platformAccounts.length === 0 || demoStage === "quoting" || demoStage === "executing"}
+                  size="sm"
                 >
-                  <SelectTrigger><SelectValue placeholder="Source" /></SelectTrigger>
-                  <SelectContent>
-                    {platformAccounts
-                      .filter((a) => a.type !== "EMBEDDED_WALLET")
-                      .map((a) => (
-                        <SelectItem key={a.id} value={a.id}>
-                          {a.balance.currency.code} ({a.type.replace(/_/g, " ")})
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Destination account</Label>
-                <Select
-                  value={demoDstId}
-                  onValueChange={setDemoDstId}
-                  disabled={platformAccounts.length === 0 || demoStage === "quoting" || demoStage === "executing"}
-                >
-                  <SelectTrigger><SelectValue placeholder="Destination" /></SelectTrigger>
-                  <SelectContent>
-                    {platformAccounts
-                      .filter((a) => a.id !== demoSrcId)
-                      .map((a) => (
-                        <SelectItem key={a.id} value={a.id}>
-                          {a.balance.currency.code} ({a.type.replace(/_/g, " ")})
-                        </SelectItem>
-                      ))}
-                    {externalAccounts.map((a) => (
-                      <SelectItem key={a.id} value={a.id}>
-                        {a.accountInfo.accountType.replace(/_/g, " ")} — Offramp
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {demoDstId.startsWith("ExternalAccount:") && (
-                  <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
-                    BRL corridor min ~$12 USD · compliance fields added automatically
-                  </p>
+                  {demoStage === "quoting" ? (
+                    <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Quoting…</>
+                  ) : "Get Quote"}
+                </Button>
+                {demoStage === "quoted" && demoQuote && (
+                  <Button onClick={handleExecuteQuote} size="sm">
+                    Execute
+                  </Button>
+                )}
+                {(demoStage === "done" || demoStage === "error") && (
+                  <Button onClick={handleReset} size="sm" variant="outline">
+                    Reset
+                  </Button>
                 )}
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <Button
-                onClick={handleCreateQuote}
-                disabled={!demoSrcId || !demoDstId || demoStage === "quoting" || demoStage === "executing"}
-                size="sm"
-              >
-                {demoStage === "quoting" ? (
-                  <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Creating quote…</>
-                ) : "Create Quote"}
-              </Button>
-              {demoStage === "quoted" && demoQuote && (
-                <Button onClick={handleExecuteQuote} size="sm" variant="default">
-                  Execute Quote
-                </Button>
-              )}
-              {(demoStage === "done" || demoStage === "error") && (
-                <Button
-                  onClick={() => { setDemoStage("idle"); setDemoQuote(null); setDemoTxn(null); setDemoError(""); }}
-                  size="sm"
-                  variant="outline"
-                >
-                  Reset
-                </Button>
-              )}
-            </div>
-
             {/* Quote preview */}
             {demoQuote && demoStage !== "idle" && (
-              <div className="rounded-lg bg-primary/5 border border-primary/20 p-3 space-y-1.5 text-sm">
+              <div className="rounded-lg bg-primary/5 border border-primary/20 p-3 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="font-medium text-xs uppercase tracking-wide text-muted-foreground">Quote</span>
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Quote</span>
                   <div className="flex items-center gap-2">
-                    <span className={`text-[10px] font-medium rounded-full px-2 py-0.5 ${
-                      demoStage === "done"
-                        ? "bg-green-500/10 text-green-600"
-                        : demoStage === "executing"
-                        ? "bg-blue-500/10 text-blue-600"
-                        : "bg-amber-500/10 text-amber-600"
+                    <span className={`text-[10px] font-semibold rounded-full px-2 py-0.5 ${
+                      demoStage === "done" ? "bg-green-500/10 text-green-600"
+                      : demoStage === "executing" ? "bg-blue-500/10 text-blue-600"
+                      : "bg-amber-500/10 text-amber-600"
                     }`}>
-                      {demoStage === "executing" ? "PROCESSING" : demoStage === "done" ? "COMPLETED" : demoQuote.status}
+                      {demoStage === "executing" ? "PROCESSING" : demoStage === "done" ? "EXECUTED" : "PENDING"}
                     </span>
                     {demoQuote.expiresAt && demoStage === "quoted" && (
                       <span className="text-[10px] text-muted-foreground">
@@ -814,73 +992,97 @@ export function LightsparkInterface() {
                     )}
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                   <div>
-                    <span className="text-muted-foreground">Send: </span>
-                    <span className="font-medium">
+                    <p className="text-muted-foreground mb-0.5">You send</p>
+                    <p className="font-semibold">
                       {demoQuote.sendingCurrency
                         ? formatLightsparkAmount(demoQuote.totalSendingAmount, demoQuote.sendingCurrency.code, demoQuote.sendingCurrency.decimals)
                         : demoQuote.totalSendingAmount}
-                    </span>
+                    </p>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">Receive: </span>
-                    <span className="font-medium text-primary">
+                    <p className="text-muted-foreground mb-0.5">They receive</p>
+                    <p className="font-semibold text-primary">
                       {demoQuote.receivingCurrency
                         ? formatLightsparkAmount(demoQuote.totalReceivingAmount, demoQuote.receivingCurrency.code, demoQuote.receivingCurrency.decimals)
                         : demoQuote.totalReceivingAmount}
-                    </span>
+                    </p>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">Rate: </span>
-                    <span className="font-medium">{demoQuote.exchangeRate ?? "—"}</span>
+                    <p className="text-muted-foreground mb-0.5">Rate</p>
+                    <p className="font-medium tabular-nums">
+                      {demoQuote.exchangeRate != null
+                        ? `${(1 / demoQuote.exchangeRate).toFixed(4)}`
+                        : "—"}
+                    </p>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">Fees: </span>
-                    <span className="font-medium">{demoQuote.feesIncluded ?? 0}</span>
+                    <p className="text-muted-foreground mb-0.5">Fees</p>
+                    <p className="font-medium tabular-nums">
+                      {demoQuote.feesIncluded != null && demoQuote.sendingCurrency
+                        ? formatLightsparkAmount(demoQuote.feesIncluded, demoQuote.sendingCurrency.code, demoQuote.sendingCurrency.decimals)
+                        : "—"}
+                    </p>
                   </div>
                 </div>
-                <p className="text-[10px] text-muted-foreground font-mono">{demoQuote.id}</p>
+                <p className="text-[10px] text-muted-foreground font-mono truncate">{demoQuote.id}</p>
               </div>
             )}
 
             {/* Completed transaction */}
-            {demoStage === "done" && demoTxn && (
-              <div className="rounded-lg bg-green-500/5 border border-green-500/20 p-3 space-y-1.5">
+            {demoStage === "done" && (
+              <div className="rounded-lg bg-green-500/5 border border-green-500/20 p-3 space-y-2">
                 <div className="flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 text-green-500" />
-                  <span className="font-medium text-sm text-green-700 dark:text-green-400">Transaction Completed</span>
+                  <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />
+                  <span className="font-semibold text-sm text-green-700 dark:text-green-400">
+                    {activeFlow === "onramp" ? "Onramp complete"
+                      : activeFlow === "swap" ? "Swap complete"
+                      : activeFlow === "offramp-usd" ? "Offramp to USD initiated"
+                      : "Offramp to fiat initiated"}
+                  </span>
                 </div>
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  {demoTxn.sentAmount && (
-                    <div>
-                      <span className="text-muted-foreground">Sent: </span>
-                      <span className="font-medium">
-                        {formatLightsparkAmount(demoTxn.sentAmount.amount, demoTxn.sentAmount.currency, 2)}
-                      </span>
-                    </div>
-                  )}
-                  {demoTxn.receivedAmount && (
-                    <div>
-                      <span className="text-muted-foreground">Received: </span>
-                      <span className="font-medium text-primary">
-                        {formatLightsparkAmount(
-                          demoTxn.receivedAmount.amount,
-                          demoTxn.receivedAmount.currency,
-                          demoTxn.receivedAmount.currency === "USDC" || demoTxn.receivedAmount.currency === "USDB" ? 6 : 2
-                        )}
-                      </span>
-                    </div>
-                  )}
-                </div>
-                <p className="text-[10px] text-muted-foreground font-mono">{demoTxn.id}</p>
+                {demoTxn ? (
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    {demoTxn.sentAmount && (
+                      <div>
+                        <p className="text-muted-foreground mb-0.5">Debited</p>
+                        <p className="font-semibold">
+                          {formatLightsparkAmount(
+                            demoTxn.sentAmount.amount,
+                            demoTxn.sentAmount.currency,
+                            ["USDC", "USDB"].includes(demoTxn.sentAmount.currency) ? 6 : 2
+                          )}
+                        </p>
+                      </div>
+                    )}
+                    {demoTxn.receivedAmount && (
+                      <div>
+                        <p className="text-muted-foreground mb-0.5">Credited</p>
+                        <p className="font-semibold text-primary">
+                          {formatLightsparkAmount(
+                            demoTxn.receivedAmount.amount,
+                            demoTxn.receivedAmount.currency,
+                            ["USDC", "USDB"].includes(demoTxn.receivedAmount.currency) ? 6 : 2
+                          )}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">Transaction is processing — check the transactions tab for status.</p>
+                )}
+                {demoTxn && (
+                  <p className="text-[10px] text-muted-foreground font-mono truncate">{demoTxn.id}</p>
+                )}
               </div>
             )}
 
             {/* Error */}
             {demoStage === "error" && demoError && (
-              <div className="rounded-lg bg-destructive/10 border border-destructive/20 px-3 py-2 text-xs text-destructive">
-                {demoError}
+              <div className="rounded-lg bg-destructive/10 border border-destructive/20 px-3 py-2.5 text-xs text-destructive">
+                <p className="font-medium mb-0.5">Quote failed</p>
+                <p>{demoError}</p>
               </div>
             )}
           </div>

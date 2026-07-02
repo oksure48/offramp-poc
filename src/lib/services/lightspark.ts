@@ -233,11 +233,22 @@ export const lightsparkClient = {
 
 export function formatLightsparkAmount(
   amount: number,
-  currencyCode: string,
+  currencyCode: any,
   decimals?: number
 ): string {
-  const code = currencyCode.toUpperCase();
-  const divisor = decimals != null ? Math.pow(10, decimals) : getDefaultDecimals(code);
+  // Be defensive: currencyCode may be a string or an object returned by the API
+  let code = "";
+  if (typeof currencyCode === "string") {
+    code = currencyCode.toUpperCase();
+  } else if (currencyCode && typeof currencyCode === "object") {
+    // Try common shapes: { code: 'USD' } or LightsparkCurrency
+    if (typeof currencyCode.code === "string") code = currencyCode.code.toUpperCase();
+    else if (typeof currencyCode.currency === "string") code = currencyCode.currency.toUpperCase();
+  } else {
+    code = String(currencyCode ?? "").toUpperCase();
+  }
+
+  const divisor = decimals != null ? Math.pow(10, decimals) : getDefaultDecimals(code || "");
 
   if (code === "BTC") {
     const btc = amount / divisor;
@@ -252,13 +263,14 @@ export function formatLightsparkAmount(
   }
 
   try {
+    if (!code) throw new Error("no currency code");
     return new Intl.NumberFormat("en-US", {
       style: "currency",
       currency: code,
       minimumFractionDigits: 2,
     }).format(value);
   } catch {
-    return `${value.toFixed(2)} ${code}`;
+    return `${value.toFixed(2)} ${code || ""}`.trim();
   }
 }
 
