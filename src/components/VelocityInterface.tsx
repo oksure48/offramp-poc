@@ -50,7 +50,7 @@ export function VelocityInterface() {
 
   const [selectedWalletId, setSelectedWalletId] = useState<string>("");
   const [selectedBankId, setSelectedBankId] = useState<string>("");
-  const [amount, setAmount] = useState("100");
+  const [amount, setAmount] = useState("55");
 
   const [quote, setQuote] = useState<(VelocityQuote & { isMock?: boolean }) | null>(null);
   const [result, setResult] = useState<{ transaction_id: string; isMock?: boolean } | null>(null);

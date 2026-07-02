@@ -13,6 +13,12 @@ function headers(): Record<string, string> {
   };
 }
 
+class VelocityApiError extends Error {
+  constructor(public readonly errorCode: string, message: string) {
+    super(message);
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
@@ -25,7 +31,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ? Object.entries(json.error_details.validation_errors).map(([k, v]) => `${k}: ${v}`).join("; ")
       : null;
     const msg = details || json?.error_message || json?.message || `Velocity API error ${res.status}`;
-    throw new Error(msg);
+    throw new VelocityApiError(json?.error_code ?? "UNKNOWN", msg);
   }
   return json as T;
 }
@@ -196,6 +202,7 @@ export const velocityClient = {
     destinationCurrency: string;
   }): Promise<VelocityQuote & { isMock?: boolean }> {
     const idempotencyKey = `quote-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let apiResult: VelocityQuote | null = null;
     try {
       const data = await request<{ data: VelocityQuote }>("/v1/quotes", {
         method: "POST",
@@ -213,11 +220,21 @@ export const velocityClient = {
           },
         }),
       });
-      return data.data;
+      apiResult = data.data ?? null;
     } catch (err) {
-      console.warn("[velocity] Quote API unavailable, using mock:", (err as Error).message);
-      return { ...buildMockQuote(params), isMock: true };
+      // Re-throw business logic errors (balance, limits, validation) — don't mock these
+      if (err instanceof VelocityApiError && err.errorCode !== "INTERNAL_ERROR") {
+        throw err;
+      }
+      console.warn("[velocity] Quote API server error, using mock:", (err as Error).message);
     }
+
+    if (apiResult) {
+      console.log("[velocity] Using live quote:", apiResult.quote_id);
+      return apiResult;
+    }
+    console.warn("[velocity] Falling back to mock quote (server error)");
+    return { ...buildMockQuote(params), isMock: true };
   },
 
   async executeQuote(quoteId: string): Promise<{ transaction_id: string; isMock?: boolean }> {
