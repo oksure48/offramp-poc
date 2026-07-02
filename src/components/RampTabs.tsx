@@ -3,8 +3,9 @@
 import { useState } from "react";
 import { RampInterface } from "@/components/RampInterface";
 import { VelocityInterface } from "@/components/VelocityInterface";
+import { LightsparkInterface } from "@/components/LightsparkInterface";
 
-type Tab = "iron" | "velocity";
+type Tab = "iron" | "velocity" | "lightspark";
 
 export function RampTabs() {
   const [tab, setTab] = useState<Tab>("iron");
@@ -18,6 +19,7 @@ export function RampTabs() {
             {([
               { id: "iron", label: "Iron and direct offramps" },
               { id: "velocity", label: "Velocity" },
+              { id: "lightspark", label: "LightSpark" },
             ] as const).map(({ id, label }) => (
               <button
                 key={id}
@@ -39,6 +41,7 @@ export function RampTabs() {
       <div className="px-4">
         {tab === "iron" && <RampInterface />}
         {tab === "velocity" && <VelocityInterface />}
+        {tab === "lightspark" && <LightsparkInterface />}
       </div>
     </div>
   );

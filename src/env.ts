@@ -17,4 +17,8 @@ export const env = {
   VELOCITY_CUSTOMER_ENTITY_ID: process.env.VELOCITY_CUSTOMER_ENTITY_ID || "",
   VELOCITY_OPERATOR_ENTITY_ID: process.env.VELOCITY_OPERATOR_ENTITY_ID || "",
   VELOCITY_BASE_URL: process.env.VELOCITY_BASE_URL || "https://api-staging.velocity.xyz",
+
+  // LightSpark Grid
+  LIGHTSPARK_CLIENT_ID: process.env.LIGHTSPARK_CLIENT_ID || "",
+  LIGHTSPARK_CLIENT_SECRET: process.env.LIGHTSPARK_CLIENT_SECRET || "",
 } as const;

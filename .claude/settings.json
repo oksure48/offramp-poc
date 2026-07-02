@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e ' *)",
+      "WebFetch(domain:app.lightspark.com)",
+      "WebFetch(domain:lightspark.com)",
+      "WebFetch(domain:api.lightspark.com)"
+    ]
+  }
+}
