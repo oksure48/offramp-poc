@@ -223,6 +223,21 @@ export const lightsparkClient = {
     return request<LightsparkTransaction>(`/transactions/${encodeURIComponent(txnId)}`);
   },
 
+  async createExternalAccount(params: {
+    customerId: string;
+    currency: string;
+    accountInfo: Record<string, unknown>;
+  }): Promise<LightsparkExternalAccount> {
+    return request<LightsparkExternalAccount>("/customers/external-accounts", {
+      method: "POST",
+      body: JSON.stringify({
+        customerId: params.customerId,
+        currency: params.currency,
+        accountInfo: params.accountInfo,
+      }),
+    });
+  },
+
   async getCustomerExternalAccounts(customerId: string): Promise<LightsparkExternalAccount[]> {
     const data = await request<PaginatedResponse<LightsparkExternalAccount>>(
       `/customers/external-accounts?customerId=${encodeURIComponent(customerId)}`
@@ -276,6 +291,8 @@ export function formatLightsparkAmount(
 
 function getDefaultDecimals(code: string): number {
   if (code === "BTC") return 8;
+  // Stablecoins and crypto with 6 decimals
+  if (["USDC", "USDT", "USDB", "EURC"].includes(code)) return 6;
   // Zero-decimal currencies
   if (["VND", "TZS", "UGX", "RWF", "XOF", "XAF"].includes(code)) return 0;
   return 2;

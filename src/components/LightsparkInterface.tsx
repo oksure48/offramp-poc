@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { type ReactNode, useState, useEffect, useCallback, useMemo } from "react";
+import { useDynamicContext, useUserWallets } from "@dynamic-labs/sdk-react-core";
 import { config } from "@/lib/config";
 import {
   Loader2,
@@ -68,6 +69,34 @@ function computeEffectiveRate(rate: LightsparkExchangeRate): string {
   if (effectiveRate >= 100) return effectiveRate.toLocaleString("en-US", { maximumFractionDigits: 0 });
   if (effectiveRate >= 1) return effectiveRate.toFixed(4);
   return effectiveRate.toFixed(6);
+}
+
+function normalizeCurrencyCode(code: unknown): string {
+  if (typeof code === "string") {
+    return code.trim().toUpperCase();
+  }
+  if (code && typeof code === "object" && "code" in code && typeof (code as any).code === "string") {
+    return (code as any).code.trim().toUpperCase();
+  }
+  return String(code ?? "").toUpperCase();
+}
+
+function isSixDecimalToken(code: unknown): boolean {
+  const normalized = normalizeCurrencyCode(code);
+  return ["USDC", "USDT", "USDB", "EURC"].includes(normalized);
+}
+
+const SOLANA_TOKEN_SYMBOLS: Record<string, string> = {
+  "Es9vMFrzaCER5Dk7cmBKnU7D44ujHLrcu1YfRZ2Agwr7": "USDC",
+  "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E": "USDT",
+  "2ndSuk6AMB1XA1fRpSE4Jpuj1TaC4nnZLezTv8z6jPY": "USDB",
+};
+
+async function fetchSolanaWalletBalances(address: string) {
+  const res = await fetch(`/api/solana/wallet-balances?address=${encodeURIComponent(address)}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Failed to fetch wallet balances");
+  return data.data as Array<{ symbol: string; amount: string; mint?: string }>;
 }
 
 const RAIL_COLORS: Record<string, string> = {
@@ -166,6 +195,9 @@ const FLOW_DEFS: Record<FlowId, FlowDef> = {
 // ─── main component ──────────────────────────────────────────────────────────
 
 export function LightsparkInterface() {
+  const { primaryWallet } = useDynamicContext();
+  const userWallets = useUserWallets();
+
   const [status, setStatus] = useState<ConnectionStatus>({ state: "loading" });
   const [customers, setCustomers] = useState<LightsparkCustomer[]>([]);
 
@@ -181,6 +213,14 @@ export function LightsparkInterface() {
   const [showAllRates, setShowAllRates] = useState(false);
 
   const [simDest, setSimDest] = useState<string>("");
+  const [solanaAddress, setSolanaAddress] = useState("");
+  const [useConnectedDynamicWallet, setUseConnectedDynamicWallet] = useState(false);
+  const [solanaDestinationAccountId, setSolanaDestinationAccountId] = useState<string | null>(null);
+  const [solanaDestinationLabel, setSolanaDestinationLabel] = useState("");
+  const [solanaDestinationChain, setSolanaDestinationChain] = useState<string | null>(null);
+  const [creatingSolanaDestination, setCreatingSolanaDestination] = useState(false);
+  const [solanaDestinationError, setSolanaDestinationError] = useState("");
+  const [solanaDestinationStatus, setSolanaDestinationStatus] = useState<"idle" | "created" | "reused">("idle");
 
   // ── platform accounts + execution demo ────────────────────────────────────
   const [platformAccounts, setPlatformAccounts] = useState<LightsparkInternalAccount[]>([]);
@@ -191,14 +231,20 @@ export function LightsparkInterface() {
   const [loadingTransactions, setLoadingTransactions] = useState<Record<string, boolean>>({});
   const [expandedAccounts, setExpandedAccounts] = useState<Record<string, boolean>>({});
   const [transactionsFallbackByCurrency, setTransactionsFallbackByCurrency] = useState<Record<string, boolean>>({});
+  const [dynamicWalletBalances, setDynamicWalletBalances] = useState<Array<{ symbol: string; amount: string; mint?: string }>>([]);
+  const [loadingDynamicWalletBalances, setLoadingDynamicWalletBalances] = useState(false);
+  const [dynamicWalletBalanceError, setDynamicWalletBalanceError] = useState("");
 
-  type DemoStage = "idle" | "quoting" | "quoted" | "executing" | "done" | "error";
+  type DemoStage = "idle" | "quoting" | "quoted" | "executing" | "settling" | "done" | "error";
   const [activeFlow, setActiveFlow] = useState<FlowId>("onramp");
   const [demoStage, setDemoStage] = useState<DemoStage>("idle");
   const [demoQuote, setDemoQuote] = useState<LightsparkQuote | null>(null);
   const [demoTxn, setDemoTxn] = useState<LightsparkTransaction | null>(null);
   const [demoError, setDemoError] = useState("");
   const [demoAmount, setDemoAmount] = useState("10");
+  const [preExecutionOnChainBalance, setPreExecutionOnChainBalance] = useState<number | null>(null);
+  const [expectedOnrampAmount, setExpectedOnrampAmount] = useState<number | null>(null);
+  const [onrampAssetSymbol, setOnrampAssetSymbol] = useState<string | null>(null);
 
   // ── data fetching ──────────────────────────────────────────────────────────
 
@@ -285,6 +331,94 @@ export function LightsparkInterface() {
     }
   }, [simDest]);
 
+  const connectedSolanaAddress = useMemo(() => {
+    const directAddress = primaryWallet?.address;
+    if (typeof directAddress === "string" && directAddress.trim() && !directAddress.startsWith("0x")) {
+      return directAddress.trim();
+    }
+    const wallet = userWallets.find((wallet: { address?: string }) => {
+      const address = wallet?.address;
+      return typeof address === "string" && address.trim() && !address.startsWith("0x");
+    });
+    return wallet?.address?.trim() ?? "";
+  }, [primaryWallet, userWallets]);
+
+  const getOnChainTokenAmount = useCallback(
+    (symbol: string, balances: Array<{ symbol: string; amount: string; mint?: string }>) => {
+      const entry = balances.find((balance) => balance.symbol === symbol);
+      return entry ? parseFloat(entry.amount) : 0;
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (useConnectedDynamicWallet && !solanaAddress && connectedSolanaAddress) {
+      setSolanaAddress(connectedSolanaAddress);
+    }
+  }, [connectedSolanaAddress, solanaAddress, useConnectedDynamicWallet]);
+
+  useEffect(() => {
+    let mounted = true;
+    const loadDynamicWalletBalances = async () => {
+      if (!connectedSolanaAddress) {
+        setDynamicWalletBalances([]);
+        setDynamicWalletBalanceError("");
+        return;
+      }
+
+      setLoadingDynamicWalletBalances(true);
+      setDynamicWalletBalanceError("");
+      try {
+        const balances = await fetchSolanaWalletBalances(connectedSolanaAddress);
+        if (mounted) {
+          setDynamicWalletBalances(balances);
+        }
+      } catch (err) {
+        if (mounted) {
+          setDynamicWalletBalanceError(err instanceof Error ? err.message : "Failed to load connected wallet balances");
+          setDynamicWalletBalances([]);
+        }
+      } finally {
+        if (mounted) setLoadingDynamicWalletBalances(false);
+      }
+    };
+
+    loadDynamicWalletBalances();
+    return () => {
+      mounted = false;
+    };
+  }, [connectedSolanaAddress]);
+
+  useEffect(() => {
+    if (demoStage !== "settling" || expectedOnrampAmount == null || !onrampAssetSymbol) return;
+    const currentOnChainBalance = getOnChainTokenAmount(onrampAssetSymbol, dynamicWalletBalances);
+    const previousBalance = preExecutionOnChainBalance ?? 0;
+    const balanceDelta = currentOnChainBalance - previousBalance;
+
+    if (balanceDelta >= expectedOnrampAmount - 0.000001) {
+      setDemoStage("done");
+    }
+  }, [demoStage, dynamicWalletBalances, expectedOnrampAmount, onrampAssetSymbol, preExecutionOnChainBalance, getOnChainTokenAmount]);
+
+  useEffect(() => {
+    if (demoStage !== "settling" || !connectedSolanaAddress || !onrampAssetSymbol) return;
+    let intervalId: number | undefined;
+    const pollBalances = async () => {
+      try {
+        const balances = await fetchSolanaWalletBalances(connectedSolanaAddress);
+        setDynamicWalletBalances(balances);
+      } catch {
+        // Keep trying until settlement or user reset.
+      }
+    };
+
+    pollBalances();
+    intervalId = window.setInterval(pollBalances, 5000);
+    return () => {
+      if (intervalId != null) window.clearInterval(intervalId);
+    };
+  }, [demoStage, connectedSolanaAddress, onrampAssetSymbol]);
+
   useEffect(() => {
     fetchStatus();
   }, [fetchStatus]);
@@ -308,6 +442,15 @@ export function LightsparkInterface() {
   }, [rates, rateSearch]);
 
   const displayedRates = showAllRates ? filteredRates : filteredRates.slice(0, 9);
+
+  const expectedOnrampFormatted = useMemo(() => {
+    if (!demoQuote?.receivingCurrency) return null;
+    return formatLightsparkAmount(
+      demoQuote.totalReceivingAmount,
+      demoQuote.receivingCurrency.code,
+      demoQuote.receivingCurrency.decimals ?? (isSixDecimalToken(demoQuote.receivingCurrency.code) ? 6 : 2)
+    );
+  }, [demoQuote]);
 
   const simRate = useMemo(() => {
     if (!simDest) return null;
@@ -388,6 +531,9 @@ export function LightsparkInterface() {
     setDemoQuote(null);
     setDemoTxn(null);
     setDemoError("");
+    setPreExecutionOnChainBalance(null);
+    setExpectedOnrampAmount(null);
+    setOnrampAssetSymbol(null);
   };
 
   const handleReset = () => {
@@ -395,11 +541,117 @@ export function LightsparkInterface() {
     setDemoQuote(null);
     setDemoTxn(null);
     setDemoError("");
+    setPreExecutionOnChainBalance(null);
+    setExpectedOnrampAmount(null);
+    setOnrampAssetSymbol(null);
+  };
+
+  const handleCreateSolanaDestination = async () => {
+    const trimmedAddress = solanaAddress.trim();
+    if (!trimmedAddress) {
+      setSolanaDestinationError("Enter a Solana wallet address to register a destination.");
+      return null;
+    }
+    if (!customers[0]?.id) {
+      setSolanaDestinationError("Create or select a customer before registering the destination.");
+      return null;
+    }
+
+    setCreatingSolanaDestination(true);
+    setSolanaDestinationError("");
+    setSolanaDestinationStatus("idle");
+    setSolanaDestinationAccountId(null);
+    setSolanaDestinationLabel("");
+    setSolanaDestinationChain(null);
+
+    const requestBody = {
+      customerId: customers[0].id,
+      currency: "USDC",
+      accountInfo: {
+        accountType: "SOLANA_WALLET",
+        assetType: "USDC",
+        address: trimmedAddress,
+        chain: "Solana",
+      },
+    };
+
+    try {
+      const res = await fetch(`${config.api.baseUrl}/api/lightspark/external-accounts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to register Solana destination");
+      }
+
+      const account = data.data;
+      if (!account?.id) {
+        throw new Error("Failed to register Solana destination");
+      }
+
+      const chain = account.accountInfo?.chain ? String(account.accountInfo.chain) : "Solana";
+      setSolanaDestinationAccountId(account.id);
+      setSolanaDestinationLabel(account.accountInfo?.address ? String(account.accountInfo.address) : trimmedAddress);
+      setSolanaDestinationChain(chain);
+      setSolanaDestinationStatus(data.duplicate ? "reused" : "created");
+      return account.id;
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Duplicate external account exists")) {
+        try {
+          const lookupRes = await fetch(
+            `${config.api.baseUrl}/api/lightspark/external-accounts?customerId=${encodeURIComponent(customers[0].id)}`
+          );
+          const lookupData = await lookupRes.json();
+          const existingAccount = (lookupData.data ?? []).find((acct: any) => {
+            const info = acct.accountInfo ?? {};
+            return info.accountType === requestBody.accountInfo.accountType && info.address === requestBody.accountInfo.address;
+          });
+          if (existingAccount?.id) {
+            const chain = existingAccount.accountInfo?.chain ? String(existingAccount.accountInfo.chain) : "Solana";
+            setSolanaDestinationAccountId(existingAccount.id);
+            setSolanaDestinationLabel(
+              existingAccount.accountInfo?.address ? String(existingAccount.accountInfo.address) : trimmedAddress
+            );
+            setSolanaDestinationChain(chain);
+            setSolanaDestinationStatus("reused");
+            return existingAccount.id;
+          }
+        } catch {
+          // continue to expose the duplicate error below if lookup fails
+        }
+        setSolanaDestinationStatus("reused");
+      } else {
+        setSolanaDestinationStatus("idle");
+      }
+      setSolanaDestinationError(err instanceof Error ? err.message : "Failed to register Solana destination");
+      return null;
+    } finally {
+      setCreatingSolanaDestination(false);
+    }
   };
 
   const handleCreateQuote = async () => {
     const parsed = parseFloat(demoAmount);
     if (isNaN(parsed) || parsed <= 0) return;
+
+    let effectiveWalletAccountId: string | undefined;
+    if (useConnectedDynamicWallet && !solanaDestinationAccountId && connectedSolanaAddress) {
+      const createdAccountId = await handleCreateSolanaDestination();
+      effectiveWalletAccountId = createdAccountId ?? solanaDestinationAccountId ?? undefined;
+      if (!effectiveWalletAccountId) {
+        setDemoError("Create a wallet destination before quoting.");
+        setDemoStage("error");
+        return;
+      }
+    } else if (useConnectedDynamicWallet && !solanaDestinationAccountId && !connectedSolanaAddress) {
+      setDemoError("Connect a Dynamic Solana wallet or register a destination before quoting.");
+      setDemoStage("error");
+      return;
+    } else {
+      effectiveWalletAccountId = solanaDestinationAccountId ?? undefined;
+    }
 
     const usdInternal = platformAccounts.find((a) => a.type === "INTERNAL_FIAT");
     const usdcInternal = platformAccounts.find((a) => a.type === "INTERNAL_CRYPTO");
@@ -407,10 +659,10 @@ export function LightsparkInterface() {
     const usdExternal = externalAccounts.find((a) => a.accountInfo.accountType === "USD_ACCOUNT");
 
     const flowIds: Record<FlowId, { srcId?: string; dstId?: string }> = {
-      onramp: { srcId: usdInternal?.id, dstId: usdcInternal?.id },
-      swap: { srcId: usdcInternal?.id, dstId: usdInternal?.id },
-      "offramp-usd": { srcId: usdcInternal?.id, dstId: usdExternal?.id },
-      "offramp-fiat": { srcId: usdcInternal?.id, dstId: brlExternal?.id },
+      onramp: { srcId: usdInternal?.id, dstId: useConnectedDynamicWallet ? effectiveWalletAccountId ?? usdcInternal?.id : usdcInternal?.id },
+      swap: { srcId: useConnectedDynamicWallet ? effectiveWalletAccountId ?? usdcInternal?.id : usdcInternal?.id, dstId: usdInternal?.id },
+      "offramp-usd": { srcId: useConnectedDynamicWallet ? effectiveWalletAccountId ?? usdcInternal?.id : usdcInternal?.id, dstId: usdExternal?.id },
+      "offramp-fiat": { srcId: useConnectedDynamicWallet ? effectiveWalletAccountId ?? usdcInternal?.id : usdcInternal?.id, dstId: brlExternal?.id },
     };
 
     const { srcId, dstId } = flowIds[activeFlow];
@@ -448,6 +700,33 @@ export function LightsparkInterface() {
     if (!demoQuote) return;
     setDemoStage("executing");
     setDemoError("");
+
+    const receivingSymbol = demoQuote.receivingCurrency ? normalizeCurrencyCode(demoQuote.receivingCurrency.code) : null;
+    const receivingDecimals = demoQuote.receivingCurrency
+      ? demoQuote.receivingCurrency.decimals ?? (isSixDecimalToken(demoQuote.receivingCurrency.code) ? 6 : 2)
+      : 2;
+    const expectedAmount = demoQuote.receivingCurrency
+      ? demoQuote.totalReceivingAmount / Math.pow(10, receivingDecimals)
+      : null;
+
+    let preExecutionBalance = null;
+    if (useConnectedDynamicWallet && connectedSolanaAddress && receivingSymbol && expectedAmount != null) {
+      try {
+        const balances = await fetchSolanaWalletBalances(connectedSolanaAddress);
+        setDynamicWalletBalances(balances);
+        preExecutionBalance = getOnChainTokenAmount(receivingSymbol, balances);
+        setPreExecutionOnChainBalance(preExecutionBalance);
+      } catch {
+        setPreExecutionOnChainBalance(null);
+      }
+      setExpectedOnrampAmount(expectedAmount);
+      setOnrampAssetSymbol(receivingSymbol);
+    } else {
+      setPreExecutionOnChainBalance(null);
+      setExpectedOnrampAmount(null);
+      setOnrampAssetSymbol(null);
+    }
+
     try {
       const res = await fetch(`${config.api.baseUrl}/api/lightspark/execute`, {
         method: "POST",
@@ -457,8 +736,20 @@ export function LightsparkInterface() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Execution failed");
       if (data.transaction) setDemoTxn(data.transaction);
-      setDemoStage("done");
-      // Refresh balances
+
+      const shouldAwaitOnChain = useConnectedDynamicWallet && connectedSolanaAddress && receivingSymbol && expectedAmount != null;
+      if (shouldAwaitOnChain) {
+        setDemoStage("settling");
+        try {
+          const balances = await fetchSolanaWalletBalances(connectedSolanaAddress);
+          setDynamicWalletBalances(balances);
+        } catch {
+          // Balance refresh may fail while waiting for on-chain settlement.
+        }
+      } else {
+        setDemoStage("done");
+      }
+
       await fetchPlatformAccounts(customers[0]?.id);
     } catch (err) {
       setDemoError(err instanceof Error ? err.message : "Execution failed");
@@ -887,7 +1178,7 @@ export function LightsparkInterface() {
                   <button
                     key={id}
                     onClick={() => handleFlowChange(id)}
-                    disabled={demoStage === "quoting" || demoStage === "executing"}
+                    disabled={demoStage === "quoting" || demoStage === "executing" || demoStage === "settling"}
                     className={`rounded-lg border p-3 text-left transition-all cursor-pointer ${
                       isActive
                         ? "border-primary bg-primary/5 shadow-sm"
@@ -935,6 +1226,107 @@ export function LightsparkInterface() {
               )}
             </div>
 
+            <div className="rounded-lg border border-sky-500/20 bg-sky-500/5 p-3 space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Solana destination</p>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    Register a Solana wallet with LightSpark so the quote targets a real wallet address.
+                  </p>
+                </div>
+                <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[10px] font-semibold text-sky-700 dark:text-sky-400">
+                  Solana
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-2 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-foreground/80">
+                  <input
+                    type="checkbox"
+                    checked={useConnectedDynamicWallet}
+                    onChange={(e) => {
+                      setUseConnectedDynamicWallet(e.target.checked);
+                      if (e.target.checked && connectedSolanaAddress) {
+                        setSolanaAddress(connectedSolanaAddress);
+                      }
+                    }}
+                    className="h-3.5 w-3.5"
+                  />
+                  Use connected Dynamic wallet
+                </label>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Input
+                  value={solanaAddress}
+                  onChange={(e) => {
+                    setSolanaAddress(e.target.value);
+                    if (solanaDestinationError) setSolanaDestinationError("");
+                  }}
+                  placeholder="Solana wallet address"
+                  className="sm:max-w-md"
+                />
+                <Button type="button" size="sm" variant="outline" onClick={handleCreateSolanaDestination} disabled={creatingSolanaDestination}>
+                  {creatingSolanaDestination ? (
+                    <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />Registering…</>
+                  ) : "Register wallet"}
+                </Button>
+              </div>
+              {solanaDestinationAccountId ? (
+                <div className={`rounded-md border p-2 text-xs ${solanaDestinationStatus === "reused" ? "border-amber-500/20 bg-amber-500/5 text-amber-700 dark:text-amber-400" : "border-emerald-500/20 bg-emerald-500/5 text-emerald-700 dark:text-emerald-400"}`}>
+                  <div className="flex items-center justify-between gap-4">
+                    <p className="font-medium">{solanaDestinationStatus === "reused" ? "Existing wallet destination reused" : "Destination ready for quotes"}</p>
+                    {solanaDestinationChain ? (
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                        {solanaDestinationChain}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mt-0.5 font-mono truncate">{solanaDestinationLabel || solanaAddress}</p>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Use a connected Solana wallet or paste any Solana address to create a LightSpark external account.
+                </p>
+              )}
+              {solanaDestinationError && (
+                <p className="text-xs text-destructive">{solanaDestinationError}</p>
+              )}
+
+              {connectedSolanaAddress && (
+                <div className="rounded-lg border border-slate-200/80 bg-slate-50 p-3 text-sm text-slate-900 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Connected Dynamic wallet</p>
+                      <p className="font-mono text-[11px] mt-1 break-all">{connectedSolanaAddress}</p>
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {loadingDynamicWalletBalances ? "Loading balances…" : "On-chain balances"}
+                    </div>
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    {loadingDynamicWalletBalances ? (
+                      <p className="text-xs text-muted-foreground">Fetching SOL and token balances from Solana RPC.</p>
+                    ) : dynamicWalletBalanceError ? (
+                      <p className="text-xs text-destructive">{dynamicWalletBalanceError}</p>
+                    ) : dynamicWalletBalances.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">No on-chain balances detected, or wallet is not on Solana mainnet.</p>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {dynamicWalletBalances.map((balance) => (
+                          <div key={balance.symbol} className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs shadow-sm dark:border-slate-800 dark:bg-slate-900">
+                            <p className="font-semibold">{balance.symbol}</p>
+                            <p className="mt-1 text-sm font-medium">{balance.amount}</p>
+                            {balance.mint && balance.symbol !== "SOL" && (
+                              <p className="mt-1 text-[10px] text-muted-foreground truncate">{balance.mint}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* Amount + actions */}
             <div className="flex flex-wrap items-end gap-3">
               <div className="space-y-1">
@@ -946,13 +1338,13 @@ export function LightsparkInterface() {
                   min="0.01"
                   step="any"
                   className="w-36"
-                  disabled={demoStage === "quoting" || demoStage === "executing"}
+                  disabled={demoStage === "quoting" || demoStage === "executing" || demoStage === "settling"}
                 />
               </div>
               <div className="flex gap-2 pb-0.5">
                 <Button
                   onClick={handleCreateQuote}
-                  disabled={platformAccounts.length === 0 || demoStage === "quoting" || demoStage === "executing"}
+                  disabled={platformAccounts.length === 0 || demoStage === "quoting" || demoStage === "executing" || demoStage === "settling"}
                   size="sm"
                 >
                   {demoStage === "quoting" ? (
@@ -981,9 +1373,13 @@ export function LightsparkInterface() {
                     <span className={`text-[10px] font-semibold rounded-full px-2 py-0.5 ${
                       demoStage === "done" ? "bg-green-500/10 text-green-600"
                       : demoStage === "executing" ? "bg-blue-500/10 text-blue-600"
-                      : "bg-amber-500/10 text-amber-600"
+                      : demoStage === "settling" ? "bg-amber-500/10 text-amber-600"
+                      : "bg-slate-500/10 text-slate-500"
                     }`}>
-                      {demoStage === "executing" ? "PROCESSING" : demoStage === "done" ? "EXECUTED" : "PENDING"}
+                      {demoStage === "executing" ? "PROCESSING"
+                        : demoStage === "settling" ? "SETTLING"
+                        : demoStage === "done" ? "CONFIRMED"
+                        : "PENDING"}
                     </span>
                     {demoQuote.expiresAt && demoStage === "quoted" && (
                       <span className="text-[10px] text-muted-foreground">
@@ -1031,15 +1427,26 @@ export function LightsparkInterface() {
             )}
 
             {/* Completed transaction */}
-            {demoStage === "done" && (
-              <div className="rounded-lg bg-green-500/5 border border-green-500/20 p-3 space-y-2">
+            {(demoStage === "done" || demoStage === "settling") && (
+              <div className={`rounded-lg p-3 space-y-2 ${demoStage === "done" ? "bg-green-500/5 border border-green-500/20" : "bg-amber-500/5 border border-amber-500/20"}`}>
                 <div className="flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />
-                  <span className="font-semibold text-sm text-green-700 dark:text-green-400">
-                    {activeFlow === "onramp" ? "Onramp complete"
-                      : activeFlow === "swap" ? "Swap complete"
-                      : activeFlow === "offramp-usd" ? "Offramp to USD initiated"
-                      : "Offramp to fiat initiated"}
+                  <CheckCircle2 className={`h-4 w-4 shrink-0 ${demoStage === "done" ? "text-green-500" : "text-amber-500"}`} />
+                  <span className={`font-semibold text-sm ${demoStage === "done" ? "text-green-700 dark:text-green-400" : "text-amber-700 dark:text-amber-300"}`}>
+                    {activeFlow === "onramp"
+                      ? demoStage === "done"
+                        ? "Onramp complete"
+                        : "Onramp awaiting on-chain settlement"
+                      : activeFlow === "swap"
+                      ? demoStage === "done"
+                        ? "Swap complete"
+                        : "Swap awaiting settlement"
+                      : activeFlow === "offramp-usd"
+                      ? demoStage === "done"
+                        ? "Offramp to USD initiated"
+                        : "Offramp awaiting settlement"
+                      : demoStage === "done"
+                      ? "Offramp to fiat initiated"
+                      : "Offramp awaiting settlement"}
                   </span>
                 </div>
                 {demoTxn ? (
@@ -1051,7 +1458,7 @@ export function LightsparkInterface() {
                           {formatLightsparkAmount(
                             demoTxn.sentAmount.amount,
                             demoTxn.sentAmount.currency,
-                            ["USDC", "USDB"].includes(demoTxn.sentAmount.currency) ? 6 : 2
+                            isSixDecimalToken(demoTxn.sentAmount.currency) ? 6 : 2
                           )}
                         </p>
                       </div>
@@ -1063,7 +1470,7 @@ export function LightsparkInterface() {
                           {formatLightsparkAmount(
                             demoTxn.receivedAmount.amount,
                             demoTxn.receivedAmount.currency,
-                            ["USDC", "USDB"].includes(demoTxn.receivedAmount.currency) ? 6 : 2
+                            isSixDecimalToken(demoTxn.receivedAmount.currency) ? 6 : 2
                           )}
                         </p>
                       </div>
@@ -1071,6 +1478,17 @@ export function LightsparkInterface() {
                   </div>
                 ) : (
                   <p className="text-xs text-muted-foreground">Transaction is processing — check the transactions tab for status.</p>
+                )}
+                {demoStage === "settling" && expectedOnrampAmount != null && onrampAssetSymbol && (
+                  <div className="rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-700">
+                    <p className="font-medium">On-chain settlement pending</p>
+                    <p className="mt-1">
+                      Waiting for {expectedOnrampFormatted ?? expectedOnrampAmount.toFixed(6)} {onrampAssetSymbol} to arrive in the connected Solana wallet.
+                    </p>
+                    <p className="mt-1 text-[10px] text-amber-700/90">
+                      Funds have left the fiat/onramp leg and are currently in the gap until on-chain arrival.
+                    </p>
+                  </div>
                 )}
                 {demoTxn && (
                   <p className="text-[10px] text-muted-foreground font-mono truncate">{demoTxn.id}</p>
@@ -1205,7 +1623,7 @@ export function LightsparkInterface() {
 
 // ─── sub-components ──────────────────────────────────────────────────────────
 
-function Stat({ label, children }: { label: string; children: React.ReactNode }) {
+function Stat({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="space-y-1">
       <p className="text-xs text-muted-foreground uppercase tracking-wide">{label}</p>
