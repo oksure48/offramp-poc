@@ -21,4 +21,11 @@ export const env = {
   // LightSpark Grid
   LIGHTSPARK_CLIENT_ID: process.env.LIGHTSPARK_CLIENT_ID || "",
   LIGHTSPARK_CLIENT_SECRET: process.env.LIGHTSPARK_CLIENT_SECRET || "",
+
+  // OpenFX
+  OPENFX_ORG_ID: process.env.OPENFX_ORG_ID || "",
+  OPENFX_API_KEY_ID: process.env.OPENFX_API_KEY_ID || "",
+  OPENFX_PRIVATE_KEY: (process.env.OPENFX_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+  OPENFX_BASE_URL: process.env.OPENFX_BASE_URL || "https://api.openfx.com",
+  OPENFX_APP_MODE: process.env.OPENFX_APP_MODE || "SANDBOX",
 } as const;
