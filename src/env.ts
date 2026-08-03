@@ -28,4 +28,9 @@ export const env = {
   OPENFX_PRIVATE_KEY: (process.env.OPENFX_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
   OPENFX_BASE_URL: process.env.OPENFX_BASE_URL || "https://api.openfx.com",
   OPENFX_APP_MODE: process.env.OPENFX_APP_MODE || "SANDBOX",
+
+  // Bitso
+  BITSO_API_KEY: process.env.BITSO_API_KEY || "",
+  BITSO_API_SECRET: process.env.BITSO_API_SECRET || "",
+  BITSO_BASE_URL: process.env.BITSO_BASE_URL || "https://api-stage.bitso.com",
 } as const;

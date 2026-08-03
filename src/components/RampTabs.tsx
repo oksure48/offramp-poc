@@ -5,8 +5,9 @@ import { RampInterface } from "@/components/RampInterface";
 import { VelocityInterface } from "@/components/VelocityInterface";
 import { LightsparkInterface } from "@/components/LightsparkInterface";
 import { OpenFXInterface } from "@/components/OpenFXInterface";
+import { BitsoInterface } from "@/components/BitsoInterface";
 
-type Tab = "iron" | "velocity" | "lightspark" | "openfx";
+type Tab = "iron" | "velocity" | "lightspark" | "openfx" | "bitso";
 
 export function RampTabs() {
   const [tab, setTab] = useState<Tab>("iron");
@@ -22,6 +23,7 @@ export function RampTabs() {
               { id: "velocity", label: "Velocity" },
               { id: "lightspark", label: "LightSpark" },
               { id: "openfx", label: "OpenFX" },
+              { id: "bitso", label: "Bitso" },
             ] as const).map(({ id, label }) => (
               <button
                 key={id}
@@ -45,6 +47,7 @@ export function RampTabs() {
         {tab === "velocity" && <VelocityInterface />}
         {tab === "lightspark" && <LightsparkInterface />}
         {tab === "openfx" && <OpenFXInterface />}
+        {tab === "bitso" && <BitsoInterface />}
       </div>
     </div>
   );
