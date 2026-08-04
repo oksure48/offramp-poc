@@ -33,4 +33,8 @@ export const env = {
   BITSO_API_KEY: process.env.BITSO_API_KEY || "",
   BITSO_API_SECRET: process.env.BITSO_API_SECRET || "",
   BITSO_BASE_URL: process.env.BITSO_BASE_URL || "https://api-stage.bitso.com",
+
+  // BetterMoney (TBMC)
+  BETTERMONEY_API_KEY: process.env.BETTERMONEY_API_KEY || "",
+  BETTERMONEY_BASE_URL: process.env.BETTERMONEY_BASE_URL || "https://api.bettermoney.com",
 } as const;
