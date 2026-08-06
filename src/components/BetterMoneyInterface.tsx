@@ -90,11 +90,17 @@ async function sendSplTransfer(
     createTransferCheckedInstruction(fromAta, mint, toAta, fromPubkey, amount, params.decimals)
   );
 
-  const { blockhash } = await connection.getLatestBlockhash();
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
   transaction.recentBlockhash = blockhash;
   transaction.feePayer = fromPubkey;
 
   const { signature } = await signer.signAndSendTransaction(transaction);
+
+  // Wait for Solana itself to confirm the transfer before handing the hash to
+  // BetterMoney — submitting it too early (right after signAndSendTransaction
+  // resolves) can race their indexer and come back with transfersProcessed: 0.
+  await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+
   return signature;
 }
 
@@ -878,7 +884,7 @@ function FundingSection({
   const { primaryWallet } = useDynamicContext();
   const userWallets = useUserWallets();
   const [copiedField, setCopiedField] = useState<string | null>(null);
-  const [fundingState, setFundingState] = useState<"idle" | "sending" | "confirming" | "done" | "error">("idle");
+  const [fundingState, setFundingState] = useState<"idle" | "sending" | "confirming" | "attributing" | "done" | "unmatched" | "error">("idle");
   const [fundingError, setFundingError] = useState("");
   const [fundingSignature, setFundingSignature] = useState("");
   const [manualHash, setManualHash] = useState("");
@@ -900,7 +906,7 @@ function FundingSection({
     }
   };
 
-  const confirmTransactions = async (hash: string, chain: string) => {
+  const confirmTransactions = async (hash: string, chain: string): Promise<number> => {
     const res = await fetch(
       `${config.api.baseUrl}/api/bettermoney/payment-orders/${encodeURIComponent(orderId)}/transactions`,
       {
@@ -911,7 +917,19 @@ function FundingSection({
     );
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Failed to confirm funding");
-    return data.data;
+    return data.data.transfersProcessed ?? 0;
+  };
+
+  // BetterMoney's own indexer can briefly lag behind Solana even after our
+  // transaction is confirmed on-chain, so a fresh submission can legitimately
+  // come back with transfersProcessed: 0 — retry a few times before giving up.
+  const confirmWithRetry = async (hash: string, chain: string, attempts = 4, delayMs = 3000): Promise<boolean> => {
+    for (let i = 0; i < attempts; i++) {
+      const transfersProcessed = await confirmTransactions(hash, chain);
+      if (transfersProcessed > 0) return true;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
+    }
+    return false;
   };
 
   const handleFundWithWallet = async (deposit: BetterMoneyDepositAddress) => {
@@ -933,10 +951,16 @@ function FundingSection({
         amountUsd,
       });
       setFundingSignature(signature);
-      setFundingState("confirming");
-      await confirmTransactions(signature, "solana");
-      setFundingState("done");
-      onConfirmed();
+      setFundingState("attributing");
+      const matched = await confirmWithRetry(signature, "solana");
+      if (matched) {
+        setFundingState("done");
+        onConfirmed();
+      } else {
+        setManualHash(signature);
+        setManualChain("solana");
+        setFundingState("unmatched");
+      }
     } catch (err) {
       setFundingError(err instanceof Error ? err.message : "Funding failed");
       setFundingState("error");
@@ -948,9 +972,14 @@ function FundingSection({
     setConfirmingManual(true);
     setFundingError("");
     try {
-      await confirmTransactions(manualHash.trim(), manualChain);
-      setFundingState("done");
-      onConfirmed();
+      const transfersProcessed = await confirmTransactions(manualHash.trim(), manualChain);
+      if (transfersProcessed > 0) {
+        setFundingState("done");
+        onConfirmed();
+      } else {
+        setFundingState("unmatched");
+        setFundingError("BetterMoney didn't find a matching transfer yet — it may still be indexing. Try again in a few seconds.");
+      }
     } catch (err) {
       setFundingError(err instanceof Error ? err.message : "Failed to confirm funding");
     } finally {
@@ -958,7 +987,7 @@ function FundingSection({
     }
   };
 
-  const busy = fundingState === "sending" || fundingState === "confirming";
+  const busy = fundingState === "sending" || fundingState === "attributing";
 
   return (
     <div className="space-y-2">
@@ -994,7 +1023,7 @@ function FundingSection({
                   )}
                   {fundingState === "sending"
                     ? "Sending transfer…"
-                    : fundingState === "confirming"
+                    : fundingState === "attributing"
                     ? "Confirming with BetterMoney…"
                     : `Fund ${d.symbol} with connected wallet (${solanaWallet!.address.slice(0, 4)}…${solanaWallet!.address.slice(-4)})`}
                 </Button>
@@ -1009,7 +1038,13 @@ function FundingSection({
           Funding confirmed{fundingSignature && ` — tx ${fundingSignature.slice(0, 10)}…`} submitted to BetterMoney.
         </div>
       )}
-      {fundingState === "error" && fundingError && (
+      {fundingState === "unmatched" && (
+        <div className="rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+          Transfer confirmed on-chain{fundingSignature && ` (tx ${fundingSignature.slice(0, 10)}…)`}, but BetterMoney hasn&apos;t matched it after several tries —
+          it may still be indexing. The hash is filled in below; hit Confirm again in a bit.
+        </div>
+      )}
+      {(fundingState === "error" || fundingState === "unmatched") && fundingError && (
         <div className="rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">{fundingError}</div>
       )}
 
